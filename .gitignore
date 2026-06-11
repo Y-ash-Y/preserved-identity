@@ -1,0 +1,15 @@
+# virtual environment
+mosaic.venv/
+.venv/
+venv/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# os
+.DS_Store
+
+# scratch outputs
+results/_*

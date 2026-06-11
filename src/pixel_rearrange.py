@@ -1,0 +1,111 @@
+# src/pixel_rearrange.py
+"""
+Identity-aware pixel rearrangement.
+
+Core idea: take a SOURCE image's pixels (the "bag of pixels") and permute them
+so the result resembles a TARGET image. Every source pixel is used exactly once,
+so the output has the *same color histogram* as the source -- it is literally the
+same pixels, shuffled in space to take the shape of the target.
+
+This is an optimal-assignment (optimal-transport) problem: match each source pixel
+to a target position, minimizing total color distance, subject to a one-to-one
+(bijection) constraint.
+
+Matching is done in CIELAB color space by default, so "distance" is perceptual
+(closer to how the eye judges color similarity) rather than raw RGB.
+
+Optionally, a small `recolor` blend nudges the rearranged pixels toward the exact
+target colors for a crisper resemblance (the "slight recoloring" knob).
+"""
+
+from __future__ import annotations
+import numpy as np
+from PIL import Image
+
+
+def load_rgb(path: str, size: tuple[int, int]) -> np.ndarray:
+    """Load an image, resize to (W, H), return float RGB array of shape (N, 3)."""
+    img = Image.open(path).convert("RGB").resize(size)
+    return np.asarray(img, dtype=np.float64).reshape(-1, 3)
+
+
+def to_feature(rgb: np.ndarray, space: str) -> np.ndarray:
+    """Map (N,3) RGB [0,255] to the color space used for distance computation."""
+    if space == "rgb":
+        return rgb
+    if space == "lab":
+        from skimage.color import rgb2lab
+        return rgb2lab((rgb / 255.0).reshape(-1, 1, 3)).reshape(-1, 3)
+    raise ValueError(f"unknown color space: {space!r}")
+
+
+def solve_assignment_exact(src_feat: np.ndarray, tgt_feat: np.ndarray) -> np.ndarray:
+    """
+    Exact optimal one-to-one assignment via the Hungarian algorithm.
+
+    Returns `perm` such that source[perm[p]] is the source pixel placed at target
+    position p. Total color distance is globally minimized.
+
+    O(N^3) -- only practical for small images (N up to a few thousand pixels).
+    """
+    from scipy.optimize import linear_sum_assignment
+    from scipy.spatial.distance import cdist
+
+    cost = cdist(tgt_feat, src_feat)            # (N_target, N_source)
+    rows, cols = linear_sum_assignment(cost)
+    perm = np.empty(len(rows), dtype=np.int64)
+    perm[rows] = cols
+    return perm
+
+
+def solve_assignment_sorted(src_feat: np.ndarray, tgt_feat: np.ndarray) -> np.ndarray:
+    """
+    Fast approximate assignment: match by sorted lightness (first feature channel:
+    L in Lab, or R in RGB). Scales to full-resolution images instantly. Baseline.
+    """
+    key_s, key_t = src_feat[:, 0], tgt_feat[:, 0]
+    src_order = np.argsort(key_s)
+    tgt_rank = np.argsort(np.argsort(key_t))
+    return src_order[tgt_rank]
+
+
+def rearrange(
+    source_path: str,
+    target_path: str,
+    out_path: str | None = None,
+    size: tuple[int, int] = (48, 48),
+    method: str = "exact",
+    space: str = "lab",
+    recolor: float = 0.0,
+) -> Image.Image:
+    """
+    Rearrange source pixels to resemble target.
+
+    size    : (W, H) working resolution. Both images are resized to this.
+    method  : "exact" (Hungarian, best, small images) or "sorted" (fast, large).
+    space   : "lab" (perceptual, recommended) or "rgb".
+    recolor : 0.0 = pure shuffle (source histogram preserved exactly).
+              >0  = blend that fraction toward true target colors (slight recoloring).
+    """
+    src_rgb = load_rgb(source_path, size)
+    tgt_rgb = load_rgb(target_path, size)
+    src_feat = to_feature(src_rgb, space)
+    tgt_feat = to_feature(tgt_rgb, space)
+
+    if method == "exact":
+        perm = solve_assignment_exact(src_feat, tgt_feat)
+    elif method == "sorted":
+        perm = solve_assignment_sorted(src_feat, tgt_feat)
+    else:
+        raise ValueError(f"unknown method: {method!r}")
+
+    out = src_rgb[perm]                          # rearranged pixels, in target order
+    if recolor > 0.0:
+        out = (1.0 - recolor) * out + recolor * tgt_rgb
+
+    out_img = Image.fromarray(
+        np.clip(out, 0, 255).astype(np.uint8).reshape(size[1], size[0], 3)
+    )
+    if out_path:
+        out_img.save(out_path)
+    return out_img
