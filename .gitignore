@@ -11,5 +11,8 @@ __pycache__/
 # os
 .DS_Store
 
+# editor / tooling
+.claude/
+
 # scratch outputs
 results/_*
