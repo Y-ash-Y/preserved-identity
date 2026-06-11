@@ -32,12 +32,43 @@ def _resample(pixels: np.ndarray, n: int, rng) -> np.ndarray:
     return pixels[idx]
 
 
-def _fill_region(src_pixels, tgt_pixels, space, leaf, rng):
-    """Rearrange a resampled bag of `src_pixels` to best match `tgt_pixels` (same count)."""
+def _fill_region(src_pixels, tgt_pixels, space, leaf, rng, k_clusters=6):
+    """
+    Rearrange a bag of `src_pixels` to fill `tgt_pixels`, with color-cluster
+    sub-matching: sort both sides by lightness, split into `k_clusters` equal tonal
+    bins, and rearrange within each bin. This enforces tonal correspondence
+    (dark source pixels -> hair/shadow, mid -> skin) instead of leaving it to chance.
+    """
     n = len(tgt_pixels)
-    bag = _resample(src_pixels, n, rng)
-    perm = solve_assignment_recursive(to_feature(bag, space), to_feature(tgt_pixels, space), leaf=leaf)
-    return bag[perm]
+    bag = _resample(src_pixels, n, rng)            # high-res pool -> subsample, no dup
+    tgt_feat = to_feature(tgt_pixels, space)
+    bag_feat = to_feature(bag, space)
+
+    out = np.empty_like(tgt_pixels)
+    t_order = np.argsort(tgt_feat[:, 0], kind="stable")   # by lightness
+    s_order = np.argsort(bag_feat[:, 0], kind="stable")
+    bounds = np.linspace(0, n, k_clusters + 1).astype(int)
+    for i in range(k_clusters):
+        a, b = bounds[i], bounds[i + 1]
+        if b <= a:
+            continue
+        ti, si = t_order[a:b], s_order[a:b]               # matched tonal bins
+        perm = solve_assignment_recursive(bag_feat[si], tgt_feat[ti], leaf=leaf)
+        out[ti] = bag[si][perm]
+    return out
+
+
+def _region_pixels(path: str, seg: str, long_edge: int = 1600):
+    """Load a source at high resolution and split into (foreground, background) pixel
+    pools. High res means each region has enough pixels to subsample without
+    duplicating, preserving its color distribution and adding detail."""
+    img = Image.open(path).convert("RGB")
+    if max(img.size) > long_edge:
+        scale = long_edge / max(img.size)
+        img = img.resize((max(1, round(img.size[0] * scale)), max(1, round(img.size[1] * scale))))
+    mask = foreground_mask(img, method=seg).reshape(-1)
+    rgb = np.asarray(img, dtype=np.float64).reshape(-1, 3)
+    return rgb[mask], rgb[~mask]
 
 
 def make_portrait(
@@ -62,11 +93,8 @@ def make_portrait(
     # target: face (foreground) vs background within the crop
     tmask = foreground_mask(crop, method=seg, rect=face_rect).reshape(-1)
 
-    # source: object (foreground) vs background, sampled on a grid comparable to the crop
-    src_img = Image.open(source_path).convert("RGB").resize((w, h))
-    smask = foreground_mask(src_img, method=seg).reshape(-1)
-    src_rgb = np.asarray(src_img, dtype=np.float64).reshape(-1, 3)
-    src_fg, src_bg = src_rgb[smask], src_rgb[~smask]
+    # source: object (foreground) vs background pixel pools at high resolution
+    src_fg, src_bg = _region_pixels(source_path, seg)
 
     out = np.empty_like(tgt_rgb)
     fg_pos, bg_pos = np.where(tmask)[0], np.where(~tmask)[0]
