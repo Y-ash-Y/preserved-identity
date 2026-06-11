@@ -16,6 +16,60 @@ from PIL import Image
 
 _MTCNN = None
 _DEEPLAB = None
+_MASKRCNN = None
+
+
+def maskrcnn_foreground(pil_img: Image.Image, score_thr: float = 0.7, max_dim: int = 1000) -> np.ndarray:
+    """
+    Subject mask via Mask R-CNN instance segmentation (COCO). Unions every confidently
+    detected object instance -- person AND held objects (book, bottle, cup, ...) -- so
+    a blue book on a blue wall is kept as foreground while the wall is background.
+    Semantic, not color-based. Returns bool (H, W). Downloads ~170 MB on first use.
+    """
+    global _MASKRCNN
+    import torch
+    from torchvision import transforms as T
+    from torchvision.models.detection import maskrcnn_resnet50_fpn, MaskRCNN_ResNet50_FPN_Weights
+
+    if _MASKRCNN is None:
+        _MASKRCNN = maskrcnn_resnet50_fpn(weights=MaskRCNN_ResNet50_FPN_Weights.DEFAULT).eval()
+
+    w, h = pil_img.size
+    small = pil_img
+    if max(w, h) > max_dim:
+        s = max_dim / max(w, h)
+        small = pil_img.resize((max(1, round(w * s)), max(1, round(h * s))))
+    x = T.functional.to_tensor(small)
+    with torch.no_grad():
+        out = _MASKRCNN([x])[0]
+    keep = out["scores"] > score_thr
+    masks = out["masks"][keep]                       # (k, 1, h', w')
+    if len(masks) == 0:
+        raise RuntimeError("no instances detected")
+    fg_small = (masks.squeeze(1) > 0.5).any(0).cpu().numpy().astype(np.uint8) * 255
+    fg = np.asarray(Image.fromarray(fg_small).resize((w, h))) > 127
+    return fg
+
+
+def subject_mask(pil_img: Image.Image, method: str = "maskrcnn", rect=None) -> np.ndarray:
+    """Foreground subject mask. Tries the requested method, then falls back:
+    maskrcnn (objects incl. held items) -> deeplab (person) -> grabcut (offline)."""
+    order = {"maskrcnn": ["maskrcnn", "deeplab", "grabcut"],
+             "deeplab": ["deeplab", "grabcut"],
+             "grabcut": ["grabcut"]}.get(method, [method])
+    for m in order:
+        try:
+            if m == "maskrcnn":
+                mask = maskrcnn_foreground(pil_img)
+            elif m == "deeplab":
+                mask = deeplab_foreground(pil_img)
+            else:
+                mask = grabcut_mask(pil_img, rect=rect)
+            if 0.01 < mask.mean() < 0.995:
+                return mask
+        except Exception:
+            continue
+    return grabcut_mask(pil_img, rect=rect)
 
 
 def deeplab_foreground(pil_img: Image.Image, classes=(15,)) -> np.ndarray:
@@ -43,19 +97,6 @@ def deeplab_foreground(pil_img: Image.Image, classes=(15,)) -> np.ndarray:
     mask = np.isin(seg, classes).astype(np.uint8) * 255
     mask = np.asarray(Image.fromarray(mask).resize((w, h))) > 127
     return mask
-
-
-def foreground_mask(pil_img: Image.Image, method: str = "grabcut", rect=None) -> np.ndarray:
-    """Foreground/subject mask. method="deeplab" (clean, needs weights) or "grabcut"
-    (offline). Falls back to GrabCut if DeepLab is unavailable or degenerate."""
-    if method == "deeplab":
-        try:
-            m = deeplab_foreground(pil_img)
-            if 0.02 < m.mean() < 0.99:
-                return m
-        except Exception:
-            pass
-    return grabcut_mask(pil_img, rect=rect)
 
 
 def _mtcnn():

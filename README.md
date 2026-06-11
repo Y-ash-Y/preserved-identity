@@ -64,45 +64,51 @@ A mostly-white source can never reproduce dark hair; a dark source can never mak
 bright sky. Pick a source whose palette resembles the target's, and the resemblance
 improves dramatically.
 
-## Region-routed portrait
+## Source-anchored portrait (the main pipeline)
 
-`src/portrait.py` builds an **upright face portrait** by routing source pixels *by
-region* instead of dumping them uniformly:
+`src/portrait.py` rearranges a source image's **own pixels** so its **subject** takes
+on the **target's face**, while keeping the source's identity intact:
 
-1. Auto-orient the target so the face is upright (robust to 90° rotations) and crop to
-   a portrait around it.
-2. Segment the crop into face (foreground) vs background.
-3. Segment the source into object (foreground) vs background.
-4. Match like-to-like — source **object → target face**, source **background → target
-   background** — each region filled by optimal-transport rearrangement of its pixels.
-5. Adopt the target's lightness/contrast via the luma recolor.
+- The output **is the source** — same size, same color histogram, same contrast,
+  brightness and intensities. Every source pixel is used exactly once (a true
+  permutation); nothing is recolored, duplicated, or dropped.
+- The **source background is left untouched**. Only the subject's pixels rearrange.
+- The **target is just a guide**: its face is auto-oriented upright and fitted into the
+  subject's bounding box, telling the subject pixels where to go.
 
-This puts the source's rich object pixels (skin, hair, clothing) onto the face instead
-of wasting them, and uses flat background pixels (sky) where a background belongs.
+**Smart, semantic foreground detection** is the key idea. Segmentation uses **Mask
+R-CNN instance masks** (it knows *person*, *book*, *bottle*, …), not color thresholding
+— so a **blue book held against a blue wall** is kept as foreground while the wall stays
+background. Color-based methods can't make that distinction; this is where the project
+goes beyond a plain pixel shuffle. Falls back to DeepLabV3 → GrabCut if unavailable.
 
 ```bash
 python -m src.portrait \
     --source data/source.jpeg \
     --target data/target.jpg \
     --out results/portrait.png \
-    --size 512
+    --max-dim 1600 --seg maskrcnn
 ```
+
+Within the subject, pixels are matched to the guide by optimal transport with tonal
+cluster sub-matching (dark → hair/shadow, mid → skin), so the rearrangement reads as a
+face. The result is genuinely *your* source image — same pixels, same palette — with the
+subject morphed toward the target.
 
 ## Structure
 
-- `src/pixel_rearrange.py` — the assignment engine (load, match, recolor, save).
-- `src/segment.py` — face detection / auto-orient + GrabCut foreground extraction.
-- `src/saliency.py` — target importance map for `--priority`.
-- `src/portrait.py` — region-routed upright portrait pipeline.
-- `src/cli.py` — command-line interface for plain rearrangement.
+- `src/pixel_rearrange.py` — the optimal-transport assignment engine + plain rearrange CLI.
+- `src/segment.py` — face detection / auto-orient, Mask R-CNN / DeepLabV3 / GrabCut masks.
+- `src/portrait.py` — the source-anchored portrait pipeline (main entry point).
+- `src/saliency.py` — target importance map for the plain `--priority` mode.
+- `src/cli.py` — command-line interface for plain whole-image rearrangement.
 - `scripts/demo_rearrange.py` — synthetic tree→face proof-of-concept.
 - `data/` — example `source.jpeg` / `target.jpg`.
 - `results/` — output images.
 
-## Status & next steps
+## Two modes
 
-Working: Lab-space matching (exact / `recursive` / `sorted` solvers), aspect-preserving
-full-resolution output, identity/saliency-weighted `--priority`, luma recolor, and the
-region-routed portrait pipeline.
-
-Next: cleaner subject segmentation (DeepLabV3 person mask) for purer foreground pixels.
+- **Plain rearrange** (`src.cli`) — rearrange a whole source into a whole target at any
+  resolution, with optional recolor. Good for the abstract "image-from-image" effect.
+- **Source-anchored portrait** (`src.portrait`) — the finished product: keep the source
+  exactly (size, palette, background) and morph only its subject toward the target face.
