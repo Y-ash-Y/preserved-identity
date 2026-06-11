@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from .pixel_rearrange import to_feature, solve_assignment_recursive, apply_recolor
-from .segment import upright_face_crop, grabcut_mask
+from .segment import upright_face_crop, foreground_mask
 
 
 def _resample(pixels: np.ndarray, n: int, rng) -> np.ndarray:
@@ -50,6 +50,7 @@ def make_portrait(
     recolor: float = 0.85,
     recolor_mode: str = "luma",
     leaf: int = 64,
+    seg: str = "deeplab",
     seed: int = 0,
 ) -> Image.Image:
     rng = np.random.default_rng(seed)
@@ -59,11 +60,11 @@ def make_portrait(
     tgt_rgb = np.asarray(crop, dtype=np.float64).reshape(-1, 3)
 
     # target: face (foreground) vs background within the crop
-    tmask = grabcut_mask(crop, rect=face_rect).reshape(-1)
+    tmask = foreground_mask(crop, method=seg, rect=face_rect).reshape(-1)
 
     # source: object (foreground) vs background, sampled on a grid comparable to the crop
     src_img = Image.open(source_path).convert("RGB").resize((w, h))
-    smask = grabcut_mask(src_img).reshape(-1)
+    smask = foreground_mask(src_img, method=seg).reshape(-1)
     src_rgb = np.asarray(src_img, dtype=np.float64).reshape(-1, 3)
     src_fg, src_bg = src_rgb[smask], src_rgb[~smask]
 
@@ -91,9 +92,11 @@ def main():
     p.add_argument("--margin", type=float, default=0.6, help="crop margin around the face box")
     p.add_argument("--recolor", type=float, default=0.85)
     p.add_argument("--recolor-mode", choices=["luma", "blend"], default="luma")
+    p.add_argument("--seg", choices=["deeplab", "grabcut"], default="deeplab",
+                   help="subject segmentation: deeplab (clean, downloads weights) or grabcut (offline)")
     args = p.parse_args()
     make_portrait(args.source, args.target, args.out, size=args.size, margin=args.margin,
-                  recolor=args.recolor, recolor_mode=args.recolor_mode)
+                  recolor=args.recolor, recolor_mode=args.recolor_mode, seg=args.seg)
     print("Saved:", args.out)
 
 

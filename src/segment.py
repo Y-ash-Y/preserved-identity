@@ -15,6 +15,47 @@ import numpy as np
 from PIL import Image
 
 _MTCNN = None
+_DEEPLAB = None
+
+
+def deeplab_foreground(pil_img: Image.Image, classes=(15,)) -> np.ndarray:
+    """
+    Subject mask via a pretrained DeepLabV3 (ResNet-50) segmentation network.
+    `classes` are Pascal-VOC label ids; 15 = person. Returns bool (H, W).
+
+    Downloads ~160 MB of weights on first use (needs internet once); raises on failure
+    so callers can fall back to GrabCut.
+    """
+    global _DEEPLAB
+    import torch
+    from torchvision import transforms as T
+    from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3_ResNet50_Weights
+
+    if _DEEPLAB is None:
+        _DEEPLAB = deeplabv3_resnet50(weights=DeepLabV3_ResNet50_Weights.DEFAULT).eval()
+
+    w, h = pil_img.size
+    inp = pil_img.resize((520, 520))
+    x = T.functional.to_tensor(inp)
+    x = T.functional.normalize(x, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]).unsqueeze(0)
+    with torch.no_grad():
+        seg = _DEEPLAB(x)["out"][0].argmax(0).cpu().numpy()
+    mask = np.isin(seg, classes).astype(np.uint8) * 255
+    mask = np.asarray(Image.fromarray(mask).resize((w, h))) > 127
+    return mask
+
+
+def foreground_mask(pil_img: Image.Image, method: str = "grabcut", rect=None) -> np.ndarray:
+    """Foreground/subject mask. method="deeplab" (clean, needs weights) or "grabcut"
+    (offline). Falls back to GrabCut if DeepLab is unavailable or degenerate."""
+    if method == "deeplab":
+        try:
+            m = deeplab_foreground(pil_img)
+            if 0.02 < m.mean() < 0.99:
+                return m
+        except Exception:
+            pass
+    return grabcut_mask(pil_img, rect=rect)
 
 
 def _mtcnn():

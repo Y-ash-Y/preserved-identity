@@ -2,3 +2,9 @@ numpy
 scipy
 Pillow
 scikit-image
+
+# portrait pipeline (face detection, segmentation)
+opencv-python      # GrabCut foreground extraction
+facenet-pytorch    # MTCNN face detection / auto-orient
+torch              # DeepLabV3 subject segmentation
+torchvision
