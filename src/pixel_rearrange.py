@@ -69,23 +69,70 @@ def solve_assignment_sorted(src_feat: np.ndarray, tgt_feat: np.ndarray) -> np.nd
     return src_order[tgt_rank]
 
 
+def solve_assignment_recursive(
+    src_feat: np.ndarray,
+    tgt_feat: np.ndarray,
+    leaf: int = 64,
+) -> np.ndarray:
+    """
+    Recursive median-split assignment: a scalable approximation of the exact
+    Hungarian result, in ~O(N log N) plus small exact solves at the leaves.
+
+    Returns `perm` (target position p -> source index), always a true bijection
+    (the source multiset is preserved exactly).
+
+    Idea: recursively partition both clouds. At each node, pick the color axis of
+    greatest variance among the target pixels, split the target positions at their
+    median into two equal halves, and split the source pixels by the same axis so
+    counts match -- pairing the low half with the low half. Once a block is <= `leaf`
+    pixels, solve it exactly with the Hungarian algorithm. This keeps each source
+    pixel in exactly one block (a global bijection) while respecting all color
+    dimensions, getting within a few percent of optimal at a fraction of the cost.
+    """
+    from scipy.optimize import linear_sum_assignment
+    from scipy.spatial.distance import cdist
+
+    n_total = len(src_feat)
+    perm = np.empty(n_total, dtype=np.int64)
+    stack = [(np.arange(n_total), np.arange(n_total))]
+    while stack:
+        si, ti = stack.pop()
+        n = len(ti)
+        if n <= leaf:
+            cost = cdist(tgt_feat[ti], src_feat[si])
+            rows, cols = linear_sum_assignment(cost)
+            perm[ti[rows]] = si[cols]
+            continue
+        axis = int(np.argmax(tgt_feat[ti].var(axis=0)))
+        ts = ti[np.argsort(tgt_feat[ti, axis], kind="stable")]
+        ss = si[np.argsort(src_feat[si, axis], kind="stable")]
+        mid = n // 2
+        stack.append((ss[:mid], ts[:mid]))
+        stack.append((ss[mid:], ts[mid:]))
+    return perm
+
+
 def rearrange(
     source_path: str,
     target_path: str,
     out_path: str | None = None,
-    size: tuple[int, int] = (48, 48),
-    method: str = "exact",
+    size: tuple[int, int] = (256, 256),
+    method: str = "recursive",
     space: str = "lab",
     recolor: float = 0.0,
+    leaf: int = 64,
 ) -> Image.Image:
     """
     Rearrange source pixels to resemble target.
 
     size    : (W, H) working resolution. Both images are resized to this.
-    method  : "exact" (Hungarian, best, small images) or "sorted" (fast, large).
+    method  : "recursive" (scalable median-split OT, default; handles megapixels),
+              "exact" (Hungarian, optimal but only small images), or
+              "sorted" (fastest, lightness only).
     space   : "lab" (perceptual, recommended) or "rgb".
     recolor : 0.0 = pure shuffle (source histogram preserved exactly).
               >0  = blend that fraction toward true target colors (slight recoloring).
+    leaf    : block size at which the recursive method solves exactly.
     """
     src_rgb = load_rgb(source_path, size)
     tgt_rgb = load_rgb(target_path, size)
@@ -96,6 +143,8 @@ def rearrange(
         perm = solve_assignment_exact(src_feat, tgt_feat)
     elif method == "sorted":
         perm = solve_assignment_sorted(src_feat, tgt_feat)
+    elif method == "recursive":
+        perm = solve_assignment_recursive(src_feat, tgt_feat, leaf=leaf)
     else:
         raise ValueError(f"unknown method: {method!r}")
 
