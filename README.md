@@ -41,26 +41,68 @@ Options:
 | `--size`    | output's longer edge; target aspect ratio is preserved. `<=0` = target's native. |
 | `--method`  | `recursive` (scalable OT, default), `exact` (optimal, ≤~64px), or `sorted`.       |
 | `--space`   | `lab` (perceptual, recommended) or `rgb`.                                         |
-| `--recolor` | `0` = pure shuffle; `>0` blends toward target colors.                             |
+| `--recolor` | `0` = pure shuffle; `>0` recolor strength toward target (default 0.85).            |
+| `--recolor-mode` | `luma` (adopt target lightness/contrast, keep source colors; default) or `blend` (linear RGB blend). |
 | `--leaf`    | block size at which `recursive` solves exactly (default 64).                      |
+| `--priority`| `0` = uniform; `>0` = top fraction of important (face/saliency) positions claim the best source pixels first. |
 
 The output grid matches the **target's aspect ratio**, and the source is resized to
 that grid — so essentially *every* source pixel is used exactly once. Use `--size 0`
 to render at the target's native resolution (e.g. a 12 MP image in ~18s).
 
+`--priority 0.3` spends the best-matching source pixels on the identity-bearing
+regions (face/edges via `src/saliency.py`) at the cost of background fidelity, while
+staying a strict permutation.
+
+### Choosing a good source (this matters most)
+
+Because the output is a *pure rearrangement*, its colors are **locked to the source's
+palette** — no algorithm can create colors the source lacks. For a good result the
+source should have a color/brightness distribution that **overlaps the target**: plenty
+of mid-tones and some dark pixels for hair/shadows, skin-like tones for skin, etc.
+A mostly-white source can never reproduce dark hair; a dark source can never make a
+bright sky. Pick a source whose palette resembles the target's, and the resemblance
+improves dramatically.
+
+## Region-routed portrait
+
+`src/portrait.py` builds an **upright face portrait** by routing source pixels *by
+region* instead of dumping them uniformly:
+
+1. Auto-orient the target so the face is upright (robust to 90° rotations) and crop to
+   a portrait around it.
+2. Segment the crop into face (foreground) vs background.
+3. Segment the source into object (foreground) vs background.
+4. Match like-to-like — source **object → target face**, source **background → target
+   background** — each region filled by optimal-transport rearrangement of its pixels.
+5. Adopt the target's lightness/contrast via the luma recolor.
+
+This puts the source's rich object pixels (skin, hair, clothing) onto the face instead
+of wasting them, and uses flat background pixels (sky) where a background belongs.
+
+```bash
+python -m src.portrait \
+    --source data/source.jpeg \
+    --target data/target.jpg \
+    --out results/portrait.png \
+    --size 512
+```
+
 ## Structure
 
 - `src/pixel_rearrange.py` — the assignment engine (load, match, recolor, save).
-- `src/cli.py` — command-line interface.
+- `src/segment.py` — face detection / auto-orient + GrabCut foreground extraction.
+- `src/saliency.py` — target importance map for `--priority`.
+- `src/portrait.py` — region-routed upright portrait pipeline.
+- `src/cli.py` — command-line interface for plain rearrangement.
 - `scripts/demo_rearrange.py` — synthetic tree→face proof-of-concept.
-- `data/` — example `source.jpg` / `target.jpg`.
+- `data/` — example `source.jpeg` / `target.jpg`.
 - `results/` — output images.
 
 ## Status & next steps
 
-Working: Lab-space matching with a recolor blend, via three solvers — exact Hungarian
-(optimal reference), the scalable `recursive` median-split OT (default, megapixel-capable),
-and a `sorted` lightness baseline. Aspect-preserving, full-resolution output that uses
-essentially all source pixels. Proven on synthetic and real images up to 12 MP.
+Working: Lab-space matching (exact / `recursive` / `sorted` solvers), aspect-preserving
+full-resolution output, identity/saliency-weighted `--priority`, luma recolor, and the
+region-routed portrait pipeline.
 
-Possible next steps: edge/structure-aware cost and a batch/gallery mode.
+Next: cleaner subject segmentation (DeepLabV3 person mask) for purer foreground pixels.

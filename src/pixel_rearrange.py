@@ -130,6 +130,87 @@ def solve_assignment_recursive(
     return perm
 
 
+def _rect_match(si, ti, src_feat, tgt_feat, leaf, perm):
+    """Match every target index in `ti` to a distinct source index drawn from `si`
+    (requires len(si) >= len(ti)). Recursive median split, rectangular at the leaves.
+    Writes results into `perm` and returns the source indices actually used."""
+    from scipy.optimize import linear_sum_assignment
+    from scipy.spatial.distance import cdist
+
+    n, m = len(ti), len(si)
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    if n <= leaf or m <= leaf:
+        cost = cdist(tgt_feat[ti], src_feat[si])      # n x m, n <= m
+        rows, cols = linear_sum_assignment(cost)       # n distinct columns
+        perm[ti[rows]] = si[cols]
+        return si[cols]
+
+    axis = int(np.argmax(tgt_feat[ti].var(axis=0)))
+    ts = ti[np.argsort(tgt_feat[ti, axis], kind="stable")]
+    ss = si[np.argsort(src_feat[si, axis], kind="stable")]
+    tn = n // 2                                        # left target count
+    # split the source at the SAME color value as the target's median, so the two
+    # halves cover aligned color ranges; then clamp so each side has source >= target.
+    split_val = tgt_feat[ts[tn], axis]
+    sm = int(np.searchsorted(src_feat[ss, axis], split_val, side="right"))
+    sm = max(tn, min(sm, m - (n - tn)))
+    used_l = _rect_match(ss[:sm], ts[:tn], src_feat, tgt_feat, leaf, perm)
+    used_r = _rect_match(ss[sm:], ts[tn:], src_feat, tgt_feat, leaf, perm)
+    return np.concatenate([used_l, used_r])
+
+
+def solve_assignment_priority(
+    src_feat: np.ndarray,
+    tgt_feat: np.ndarray,
+    importance: np.ndarray,
+    leaf: int = 64,
+    top_frac: float = 0.3,
+) -> np.ndarray:
+    """
+    Importance-aware assignment, still a strict permutation.
+
+    The top `top_frac` most important target positions are matched FIRST against the
+    *entire* source pool, so they claim the globally best-fitting source pixels. The
+    remaining target positions are then matched to whatever source pixels are left.
+    This spends the scarce well-matching pixels on the identity-bearing regions.
+    """
+    N = len(tgt_feat)
+    perm = np.empty(N, dtype=np.int64)
+    order = np.argsort(-importance, kind="stable")
+    n_a = max(1, min(N - 1, int(round(top_frac * N))))
+    a_idx = order[:n_a]                                # high-importance positions
+    b_idx = order[n_a:]                                # the rest
+
+    used = _rect_match(np.arange(N), a_idx, src_feat, tgt_feat, leaf, perm)
+    free = np.setdiff1d(np.arange(N), used, assume_unique=False)
+    sub = solve_assignment_recursive(src_feat[free], tgt_feat[b_idx], leaf=leaf)
+    perm[b_idx] = free[sub]
+    return perm
+
+
+def apply_recolor(out, tgt_rgb, recolor: float, recolor_mode: str, w: int, h: int):
+    """Shift rearranged pixels `out` (N,3 RGB) toward target colors.
+
+    "blend" = linear RGB blend; "luma" = adopt the target's lightness/contrast while
+    keeping the source's chroma (strong resemblance per unit of recolor).
+    """
+    if recolor <= 0.0:
+        return out
+    if recolor_mode == "blend":
+        return (1.0 - recolor) * out + recolor * tgt_rgb
+    if recolor_mode == "luma":
+        from skimage.color import rgb2lab, lab2rgb
+        r = rgb2lab((out / 255.0).reshape(h, w, 3))
+        t = rgb2lab((tgt_rgb / 255.0).reshape(h, w, 3))
+        a_c = recolor * 0.33                       # chroma shifts less than lightness
+        r[..., 0] = (1 - recolor) * r[..., 0] + recolor * t[..., 0]
+        r[..., 1] = (1 - a_c) * r[..., 1] + a_c * t[..., 1]
+        r[..., 2] = (1 - a_c) * r[..., 2] + a_c * t[..., 2]
+        return (lab2rgb(r) * 255.0).reshape(-1, 3)
+    raise ValueError(f"unknown recolor_mode: {recolor_mode!r}")
+
+
 def rearrange(
     source_path: str,
     target_path: str,
@@ -138,21 +219,30 @@ def rearrange(
     method: str = "recursive",
     space: str = "lab",
     recolor: float = 0.0,
+    recolor_mode: str = "luma",
     leaf: int = 64,
+    priority: float = 0.0,
 ) -> Image.Image:
     """
     Rearrange source pixels to resemble target.
 
-    size    : length of the output's longer edge (target aspect ratio is preserved).
-              None uses the target's native resolution. The source is resized to the
-              same grid, so essentially every source pixel is used exactly once.
-    method  : "recursive" (scalable median-split OT, default; handles megapixels),
-              "exact" (Hungarian, optimal but only small images), or
-              "sorted" (fastest, lightness only).
-    space   : "lab" (perceptual, recommended) or "rgb".
-    recolor : 0.0 = pure shuffle (source histogram preserved exactly).
-              >0  = blend that fraction toward true target colors (slight recoloring).
-    leaf    : block size at which the recursive method solves exactly.
+    size     : length of the output's longer edge (target aspect ratio is preserved).
+               None uses the target's native resolution. The source is resized to the
+               same grid, so essentially every source pixel is used exactly once.
+    method   : "recursive" (scalable median-split OT, default; handles megapixels),
+               "exact" (Hungarian, optimal but only small images), or
+               "sorted" (fastest, lightness only).
+    space    : "lab" (perceptual, recommended) or "rgb".
+    recolor  : 0.0 = pure shuffle (source histogram preserved exactly).
+               >0  = recolor strength toward the target (see recolor_mode).
+    recolor_mode : "luma" (default) keeps the source's colors but adopts the target's
+               lightness/contrast structure -- strong resemblance per unit of recolor,
+               best when the source palette is poor. "blend" is a plain linear blend
+               toward the target's RGB.
+    leaf     : block size at which the recursive method solves exactly.
+    priority : 0.0 = uniform matching. >0 = the top `priority` fraction of important
+               (face/saliency) target positions claim the best source pixels first.
+               Stays a strict permutation; overrides `method` with the priority solver.
     """
     w, h = output_dims(target_path, size)
     src_rgb = load_rgb(source_path, (w, h))
@@ -160,7 +250,11 @@ def rearrange(
     src_feat = to_feature(src_rgb, space)
     tgt_feat = to_feature(tgt_rgb, space)
 
-    if method == "exact":
+    if priority > 0.0:
+        from .saliency import importance_map
+        imp = importance_map(target_path, (w, h))
+        perm = solve_assignment_priority(src_feat, tgt_feat, imp, leaf=leaf, top_frac=priority)
+    elif method == "exact":
         perm = solve_assignment_exact(src_feat, tgt_feat)
     elif method == "sorted":
         perm = solve_assignment_sorted(src_feat, tgt_feat)
@@ -169,9 +263,7 @@ def rearrange(
     else:
         raise ValueError(f"unknown method: {method!r}")
 
-    out = src_rgb[perm]                          # rearranged pixels, in target order
-    if recolor > 0.0:
-        out = (1.0 - recolor) * out + recolor * tgt_rgb
+    out = apply_recolor(src_rgb[perm], tgt_rgb, recolor, recolor_mode, w, h)
 
     out_img = Image.fromarray(
         np.clip(out, 0, 255).astype(np.uint8).reshape(h, w, 3)
