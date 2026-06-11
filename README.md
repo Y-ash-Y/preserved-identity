@@ -31,18 +31,22 @@ python -m src.cli \
     --source data/source.jpg \
     --target data/target.jpg \
     --out results/out.png \
-    --size 512 --space lab --recolor 0.3
+    --size 1024 --space lab --recolor 0.3
 ```
 
 Options:
 
-| flag        | meaning                                                                        |
-|-------------|--------------------------------------------------------------------------------|
-| `--size`    | working square resolution (SxS). `recursive` handles megapixels.               |
-| `--method`  | `recursive` (scalable OT, default), `exact` (optimal, ≤~64px), or `sorted`.     |
-| `--space`   | `lab` (perceptual, recommended) or `rgb`.                                       |
-| `--recolor` | `0` = pure shuffle; `>0` blends toward target colors.                           |
-| `--leaf`    | block size at which `recursive` solves exactly (default 64).                    |
+| flag        | meaning                                                                          |
+|-------------|----------------------------------------------------------------------------------|
+| `--size`    | output's longer edge; target aspect ratio is preserved. `<=0` = target's native. |
+| `--method`  | `recursive` (scalable OT, default), `exact` (optimal, ≤~64px), or `sorted`.       |
+| `--space`   | `lab` (perceptual, recommended) or `rgb`.                                         |
+| `--recolor` | `0` = pure shuffle; `>0` blends toward target colors.                             |
+| `--leaf`    | block size at which `recursive` solves exactly (default 64).                      |
+
+The output grid matches the **target's aspect ratio**, and the source is resized to
+that grid — so essentially *every* source pixel is used exactly once. Use `--size 0`
+to render at the target's native resolution (e.g. a 12 MP image in ~18s).
 
 ## Structure
 
@@ -56,7 +60,7 @@ Options:
 
 Working: Lab-space matching with a recolor blend, via three solvers — exact Hungarian
 (optimal reference), the scalable `recursive` median-split OT (default, megapixel-capable),
-and a `sorted` lightness baseline. Proven on synthetic and real images up to 1024px.
+and a `sorted` lightness baseline. Aspect-preserving, full-resolution output that uses
+essentially all source pixels. Proven on synthetic and real images up to 12 MP.
 
-Possible next steps: edge/structure-aware cost, alternative target aspect ratios
-(currently squared), and a batch/gallery mode.
+Possible next steps: edge/structure-aware cost and a batch/gallery mode.

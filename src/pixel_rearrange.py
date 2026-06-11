@@ -29,6 +29,24 @@ def load_rgb(path: str, size: tuple[int, int]) -> np.ndarray:
     return np.asarray(img, dtype=np.float64).reshape(-1, 3)
 
 
+def output_dims(target_path: str, long_edge: int | None) -> tuple[int, int]:
+    """
+    Decide the output grid (W, H) from the target's native aspect ratio.
+
+    long_edge : length of the longer side; None keeps the target's native size.
+    The source is later resized to this same grid so that every output position
+    is filled by one source pixel (a true bijection over essentially all source
+    pixels), while the target's proportions are preserved (no squaring).
+    """
+    with Image.open(target_path) as img:
+        w, h = img.size
+    if long_edge is None:
+        return w, h
+    if w >= h:
+        return long_edge, max(1, round(h * long_edge / w))
+    return max(1, round(w * long_edge / h)), long_edge
+
+
 def to_feature(rgb: np.ndarray, space: str) -> np.ndarray:
     """Map (N,3) RGB [0,255] to the color space used for distance computation."""
     if space == "rgb":
@@ -116,7 +134,7 @@ def rearrange(
     source_path: str,
     target_path: str,
     out_path: str | None = None,
-    size: tuple[int, int] = (256, 256),
+    size: int | None = 1024,
     method: str = "recursive",
     space: str = "lab",
     recolor: float = 0.0,
@@ -125,7 +143,9 @@ def rearrange(
     """
     Rearrange source pixels to resemble target.
 
-    size    : (W, H) working resolution. Both images are resized to this.
+    size    : length of the output's longer edge (target aspect ratio is preserved).
+              None uses the target's native resolution. The source is resized to the
+              same grid, so essentially every source pixel is used exactly once.
     method  : "recursive" (scalable median-split OT, default; handles megapixels),
               "exact" (Hungarian, optimal but only small images), or
               "sorted" (fastest, lightness only).
@@ -134,8 +154,9 @@ def rearrange(
               >0  = blend that fraction toward true target colors (slight recoloring).
     leaf    : block size at which the recursive method solves exactly.
     """
-    src_rgb = load_rgb(source_path, size)
-    tgt_rgb = load_rgb(target_path, size)
+    w, h = output_dims(target_path, size)
+    src_rgb = load_rgb(source_path, (w, h))
+    tgt_rgb = load_rgb(target_path, (w, h))
     src_feat = to_feature(src_rgb, space)
     tgt_feat = to_feature(tgt_rgb, space)
 
@@ -153,7 +174,7 @@ def rearrange(
         out = (1.0 - recolor) * out + recolor * tgt_rgb
 
     out_img = Image.fromarray(
-        np.clip(out, 0, 255).astype(np.uint8).reshape(size[1], size[0], 3)
+        np.clip(out, 0, 255).astype(np.uint8).reshape(h, w, 3)
     )
     if out_path:
         out_img.save(out_path)

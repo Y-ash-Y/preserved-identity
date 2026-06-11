@@ -45,7 +45,7 @@ make_face(tgt)
 
 for recolor in (0.0, 0.25):
     out = f"results/demo_rearranged_recolor{recolor}.png"
-    rearrange(src, tgt, out, size=(SIZE, SIZE), method="exact", recolor=recolor)
+    rearrange(src, tgt, out, size=SIZE, method="exact", recolor=recolor)
     print(f"  wrote {out}")
 
 same = np.array_equal(histogram(src), histogram("results/demo_rearranged_recolor0.0.png"))

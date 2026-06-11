@@ -14,7 +14,8 @@ def main():
     p.add_argument("--source", required=True, help="image whose pixels are reused")
     p.add_argument("--target", required=True, help="image whose shape to reproduce")
     p.add_argument("--out", default="results/out.png")
-    p.add_argument("--size", type=int, default=256, help="working square resolution (S x S)")
+    p.add_argument("--size", type=int, default=1024,
+                   help="output longer-edge length (target aspect preserved); <=0 = native")
     p.add_argument("--method", choices=["recursive", "exact", "sorted"], default="recursive",
                    help="recursive=scalable OT (default); exact=Hungarian (small); sorted=fastest")
     p.add_argument("--space", choices=["lab", "rgb"], default="lab",
@@ -26,7 +27,7 @@ def main():
     args = p.parse_args()
 
     rearrange(args.source, args.target, args.out,
-              size=(args.size, args.size), method=args.method,
+              size=(args.size if args.size > 0 else None), method=args.method,
               space=args.space, recolor=args.recolor, leaf=args.leaf)
     print("Saved:", args.out)
 
