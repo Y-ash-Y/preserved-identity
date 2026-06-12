@@ -19,12 +19,17 @@ _DEEPLAB = None
 _MASKRCNN = None
 
 
-def maskrcnn_foreground(pil_img: Image.Image, score_thr: float = 0.7, max_dim: int = 1000) -> np.ndarray:
+def maskrcnn_foreground(pil_img: Image.Image, score_thr: float = 0.7, max_dim: int = 1000,
+                        person_only: bool = False) -> np.ndarray:
     """
     Subject mask via Mask R-CNN instance segmentation (COCO). Unions every confidently
     detected object instance -- person AND held objects (book, bottle, cup, ...) -- so
     a blue book on a blue wall is kept as foreground while the wall is background.
     Semantic, not color-based. Returns bool (H, W). Downloads ~170 MB on first use.
+
+    person_only=True keeps only `person` instances (COCO label 1). Use this for the
+    TARGET subject guide, so nearby furniture (a chair behind the head, etc.) is never
+    merged into the silhouette; leave it False for the source to protect held objects.
     """
     global _MASKRCNN
     import torch
@@ -43,6 +48,8 @@ def maskrcnn_foreground(pil_img: Image.Image, score_thr: float = 0.7, max_dim: i
     with torch.no_grad():
         out = _MASKRCNN([x])[0]
     keep = out["scores"] > score_thr
+    if person_only:
+        keep = keep & (out["labels"] == 1)           # COCO: 1 == person
     masks = out["masks"][keep]                       # (k, 1, h', w')
     if len(masks) == 0:
         raise RuntimeError("no instances detected")
@@ -51,16 +58,21 @@ def maskrcnn_foreground(pil_img: Image.Image, score_thr: float = 0.7, max_dim: i
     return fg
 
 
-def subject_mask(pil_img: Image.Image, method: str = "maskrcnn", rect=None) -> np.ndarray:
+def subject_mask(pil_img: Image.Image, method: str = "maskrcnn", rect=None,
+                 person_only: bool = False) -> np.ndarray:
     """Foreground subject mask. Tries the requested method, then falls back:
-    maskrcnn (objects incl. held items) -> deeplab (person) -> grabcut (offline)."""
+    maskrcnn (objects incl. held items) -> deeplab (person) -> grabcut (offline).
+
+    person_only=True restricts Mask R-CNN to `person` instances (DeepLab is already
+    person-only); use it for the target subject so background furniture isn't merged in.
+    """
     order = {"maskrcnn": ["maskrcnn", "deeplab", "grabcut"],
              "deeplab": ["deeplab", "grabcut"],
              "grabcut": ["grabcut"]}.get(method, [method])
     for m in order:
         try:
             if m == "maskrcnn":
-                mask = maskrcnn_foreground(pil_img)
+                mask = maskrcnn_foreground(pil_img, person_only=person_only)
             elif m == "deeplab":
                 mask = deeplab_foreground(pil_img)
             else:
@@ -130,6 +142,12 @@ def best_face(path: str, work: int = 1100):
         return None
     _, k, box, size = best
     return k, box, size
+
+
+def upright_orientation(path: str) -> int:
+    """Number of 90-degree CCW rotations that make the detected face upright (0 if none)."""
+    found = best_face(path)
+    return 0 if found is None else found[0]
 
 
 def upright_face_crop(path: str, size: int = 512, margin: float = 0.6):
